@@ -2,16 +2,15 @@
 
 All settings can be overridden via environment variables (or a local .env).
 Model ids and the optional base_url make it easy to swap Claude models or
-point at an OpenAI/Anthropic-compatible gateway without touching code.
+point at an Anthropic-compatible gateway without touching code.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
-from pydantic_ai.models.anthropic import AnthropicModel
-from pydantic_ai.providers.anthropic import AnthropicProvider
+from langchain_anthropic import ChatAnthropic
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -63,14 +62,19 @@ def load_settings() -> Settings:
     return Settings()
 
 
-def build_model(settings: Settings, model_name: str) -> AnthropicModel:
-    """Construct an Anthropic-backed model, honouring an optional base_url.
+def build_model(settings: Settings, model_name: str) -> ChatAnthropic:
+    """Construct an Anthropic-backed chat model, honouring an optional base_url.
 
     The same provider config drives both the SQL and answer models, so callers
-    just pass the model id (settings.sql_model or settings.answer_model).
+    just pass the model id (settings.sql_model or settings.answer_model). A blank
+    api_key is passed as None so ChatAnthropic falls back to ANTHROPIC_API_KEY;
+    a None base_url uses Anthropic's default endpoint.
     """
-    provider = AnthropicProvider(
-        api_key=settings.anthropic_api_key or None,
+    api_key = SecretStr(settings.anthropic_api_key) if settings.anthropic_api_key else None
+    return ChatAnthropic(
+        model_name=model_name,
+        api_key=api_key,  # pyright: ignore[reportArgumentType]  # None => ANTHROPIC_API_KEY
         base_url=settings.base_url,
+        timeout=None,
+        stop=None,
     )
-    return AnthropicModel(model_name, provider=provider)

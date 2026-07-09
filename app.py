@@ -14,11 +14,11 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from langchain_core.language_models import BaseChatModel
+from langchain_core.runnables import Runnable
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent
-from pydantic_ai.exceptions import UnexpectedModelBehavior
 
-from agent import SqlDeps, SqlQuery, build_sql_agent, generate_sql
+from agent import SqlGenerationError, SqlQuery, build_sql_agent, generate_sql
 from answer import answer_question, build_answer_agent
 from config import Settings, load_settings
 from data_dictionary import load_dictionary
@@ -57,8 +57,8 @@ class AppState:
     source: DataSource
     schema_text: str
     dict_text: str
-    sql_agent: Agent[SqlDeps, SqlQuery]
-    answer_agent: Agent[None, str]
+    sql_agent: Runnable[list, SqlQuery]
+    answer_agent: BaseChatModel
 
 
 def _load_dict_text(settings: Settings) -> str:
@@ -121,7 +121,7 @@ def query(req: QueryRequest, ctx: CtxDep) -> QueryResponse:
         sql, rows = generate_sql(
             ctx.sql_agent, req.question, ctx.schema_text, ctx.dict_text, ctx.source
         )
-    except UnexpectedModelBehavior as exc:
+    except SqlGenerationError as exc:
         raise HTTPException(
             status_code=422,
             detail="Could not produce a working query for that question. Try rephrasing it.",

@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 
-from pydantic_ai import Agent
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from config import Settings, build_model
 
@@ -26,17 +27,13 @@ Rules:
 """
 
 
-def build_answer_agent(settings: Settings) -> Agent[None, str]:
-    """Create the natural-language answer agent bound to the answer model."""
-    return Agent(
-        build_model(settings, settings.answer_model),
-        output_type=str,
-        instructions=_INSTRUCTIONS,
-    )
+def build_answer_agent(settings: Settings) -> BaseChatModel:
+    """Create the natural-language answer chat model bound to the answer model."""
+    return build_model(settings, settings.answer_model)
 
 
 def answer_question(
-    agent: Agent[None, str],
+    agent: BaseChatModel,
     question: str,
     rows: list[dict],
 ) -> str:
@@ -46,5 +43,8 @@ def answer_question(
         f"# Question\n{question}\n\n"
         f"# Query results ({len(rows)} rows)\n{rows_json}"
     )
-    result = agent.run_sync(prompt)
-    return result.output.strip()
+    result = agent.invoke([SystemMessage(_INSTRUCTIONS), HumanMessage(prompt)])
+    text = result.content
+    if not isinstance(text, str):
+        text = str(text)
+    return text.strip()

@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import ExitStack
 from pathlib import Path
 
 import duckdb
 import pytest
 from fastapi.testclient import TestClient
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
+from langchain_core.language_models import BaseChatModel
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import Runnable, RunnableLambda
 
-from agent import build_sql_agent
-from answer import build_answer_agent
+from agent import SqlQuery
 from app import AppState, app, get_ctx
 from config import Settings
 from data_source import DataSource
@@ -38,32 +38,23 @@ def source(tmp_path: Path) -> Iterator[DataSource]:
     src.close()
 
 
-def _emit_sql(sql: str, info: AgentInfo) -> ModelResponse:
-    """Build a model response that calls the structured-output tool with `sql`."""
-    tool = info.output_tools[0]
-    return ModelResponse(parts=[ToolCallPart(tool.name, {"sql": sql})])
+def _sql_agent(sql: str) -> Runnable[list, SqlQuery]:
+    """A fake SQL runnable that always returns the given SQL as a SqlQuery."""
+    return RunnableLambda(lambda _messages: SqlQuery(sql=sql))
 
 
-def _emit_text(text: str) -> ModelResponse:
-    """Build a plain-text model response for the answer agent."""
-    return ModelResponse(parts=[TextPart(content=text)])
+def _answer_agent(text: str) -> GenericFakeChatModel:
+    """A fake answer chat model that always replies with the given text."""
+    # GenericFakeChatModel cycles through its message iterator indefinitely.
+    return GenericFakeChatModel(messages=iter([AIMessage(content=text)]))
 
 
-@pytest.fixture
-def client(source: DataSource) -> Iterator[TestClient]:
-    """A TestClient with the real lifespan bypassed and a stubbed AppState injected."""
-    settings = Settings(anthropic_api_key="x")
-    sql_agent = build_sql_agent(settings)
-    answer_agent = build_answer_agent(settings)
-
-    def sql_fn(_messages, info: AgentInfo) -> ModelResponse:
-        return _emit_sql("SELECT name FROM sheet1", info)
-
-    def answer_fn(_messages, _info: AgentInfo) -> ModelResponse:
-        return _emit_text("Alice and Bob.")
-
-    test_ctx = AppState(
-        settings=settings,
+def _ctx(
+    source: DataSource, sql_agent: Runnable, answer_agent: BaseChatModel
+) -> AppState:
+    """Build an AppState with stubbed agents over the fixture source."""
+    return AppState(
+        settings=Settings(anthropic_api_key="x"),
         source=source,
         schema_text=source.schema_text(),
         dict_text="",
@@ -71,14 +62,20 @@ def client(source: DataSource) -> Iterator[TestClient]:
         answer_agent=answer_agent,
     )
 
-    with ExitStack() as stack:
-        stack.enter_context(sql_agent.override(model=FunctionModel(sql_fn)))
-        stack.enter_context(answer_agent.override(model=FunctionModel(answer_fn)))
-        app.dependency_overrides[get_ctx] = lambda: test_ctx
-        try:
-            yield TestClient(app)
-        finally:
-            del app.dependency_overrides[get_ctx]
+
+@pytest.fixture
+def client(source: DataSource) -> Iterator[TestClient]:
+    """A TestClient with the real lifespan bypassed and a stubbed AppState injected."""
+    test_ctx = _ctx(
+        source,
+        _sql_agent("SELECT name FROM sheet1"),
+        _answer_agent("Alice and Bob."),
+    )
+    app.dependency_overrides[get_ctx] = lambda: test_ctx
+    try:
+        yield TestClient(app)
+    finally:
+        del app.dependency_overrides[get_ctx]
 
 
 def test_health(client: TestClient) -> None:
@@ -112,29 +109,16 @@ def test_query_with_debug_includes_sql_and_rows(client: TestClient) -> None:
 
 def test_query_gives_up_after_max_retries_returns_422(source: DataSource) -> None:
     """Persistently invalid SQL exhausts retries and surfaces as a 422."""
-    settings = Settings(anthropic_api_key="x")
-    sql_agent = build_sql_agent(settings)
-    answer_agent = build_answer_agent(settings)
-
-    def bad_sql_fn(_messages, info: AgentInfo) -> ModelResponse:
-        return _emit_sql("SELECT still_wrong FROM sheet1", info)
-
-    test_ctx = AppState(
-        settings=settings,
-        source=source,
-        schema_text=source.schema_text(),
-        dict_text="",
-        sql_agent=sql_agent,
-        answer_agent=answer_agent,
+    test_ctx = _ctx(
+        source,
+        _sql_agent("SELECT still_wrong FROM sheet1"),
+        _answer_agent("unused"),
     )
-
-    with ExitStack() as stack:
-        stack.enter_context(sql_agent.override(model=FunctionModel(bad_sql_fn)))
-        app.dependency_overrides[get_ctx] = lambda: test_ctx
-        try:
-            resp = TestClient(app).post("/query", json={"question": "list names"})
-        finally:
-            del app.dependency_overrides[get_ctx]
+    app.dependency_overrides[get_ctx] = lambda: test_ctx
+    try:
+        resp = TestClient(app).post("/query", json={"question": "list names"})
+    finally:
+        del app.dependency_overrides[get_ctx]
 
     assert resp.status_code == 422
     assert isinstance(resp.json()["detail"], str)

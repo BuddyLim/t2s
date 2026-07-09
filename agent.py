@@ -3,21 +3,24 @@
 Uses the fast/cheap model. Output is validated as a Pydantic model so we always
 get a single SQL string field back, never free-form prose.
 
-The output validator *executes* the query against DuckDB. If the SQL is invalid
-(wrong column, bad function, syntax error) or not read-only, it raises ModelRetry
-with the actual error, so PydanticAI re-prompts the model to fix it — up to
-`_MAX_RETRIES` times. On success the result rows are captured on the deps object,
-so the query only runs once for the whole pipeline.
+`generate_sql` runs an execute-and-retry loop: it asks the model for a `SqlQuery`,
+*executes* it against DuckDB, and if the SQL is invalid (wrong column, bad
+function, syntax error) or not read-only, it feeds the actual error back into the
+conversation and re-prompts — up to `_MAX_RETRIES` times (so `_MAX_RETRIES + 1`
+attempts total). On success the result rows are returned alongside the SQL, so the
+query only runs once for the whole pipeline. If every attempt fails, it raises
+`SqlGenerationError`.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import cast
 
 import duckdb
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import Runnable
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, ModelRetry, RunContext
 
 from config import Settings, build_model
 from data_source import DataSource, UnsafeQueryError
@@ -52,52 +55,68 @@ class SqlQuery(BaseModel):
     sql: str = Field(description="A single read-only DuckDB SELECT statement.")
 
 
-@dataclass
-class SqlDeps:
-    """Dependencies for the SQL agent; also captures the executed rows."""
-
-    source: DataSource
-    rows: list[dict] = field(default_factory=list)
+class SqlGenerationError(RuntimeError):
+    """Raised when the model can't produce a working query within the retry budget."""
 
 
-def build_sql_agent(settings: Settings) -> Agent[SqlDeps, SqlQuery]:
-    """Create the text-to-SQL agent, with execution-based retry against DuckDB."""
-    # `ty` cannot infer the generic `OutputDataT` from `output_type=SqlQuery`
-    # (the `OutputSpec` alias is recursive), so it falls back to the default
-    # `Agent[SqlDeps, str]`. Cast to pin the real output type; no runtime effect.
-    agent = cast(
-        "Agent[SqlDeps, SqlQuery]",
-        Agent(
-            build_model(settings, settings.sql_model),
-            output_type=SqlQuery,
-            deps_type=SqlDeps,
-            instructions=_INSTRUCTIONS,
-            retries=_MAX_RETRIES,
-        ),
+class _RetrySql(Exception):
+    """Internal signal that a generated query failed; carries the model feedback.
+
+    `feedback` is the message we send back to the model so it can fix the SQL.
+    """
+
+    def __init__(self, feedback: str) -> None:
+        super().__init__(feedback)
+        self.feedback = feedback
+
+
+def _execute(source: DataSource, sql: str) -> list[dict]:
+    """Run `sql` read-only and return the rows.
+
+    Translates a rejection or DuckDB error into a `_RetrySql` signal (chained to
+    the original exception) so the caller can re-prompt the model instead of
+    handling two exception types inline.
+    """
+    try:
+        return source.run_sql(sql)
+    except UnsafeQueryError as exc:
+        raise _RetrySql(
+            f"The query was rejected because it is not read-only: {exc}. "
+            "Return a single read-only SELECT statement."
+        ) from exc
+    except duckdb.Error as exc:
+        raise _RetrySql(
+            f"The query failed to run in DuckDB with error: {exc}. "
+            "Fix the SQL, using only the tables and columns from the schema."
+        ) from exc
+
+
+def build_sql_agent(settings: Settings) -> Runnable[list, SqlQuery]:
+    """Create the text-to-SQL runnable: a chat model bound to the SqlQuery schema.
+
+    `.invoke(messages)` returns a `SqlQuery`. The execute-and-retry loop lives in
+    `generate_sql`, which drives this runnable.
+    """
+    model: BaseChatModel = build_model(settings, settings.sql_model)
+    # with_structured_output is typed as returning `dict | BaseModel`; pin the
+    # concrete SqlQuery output for callers. No runtime effect.
+    return cast(
+        "Runnable[list, SqlQuery]",
+        model.with_structured_output(SqlQuery),
     )
 
-    @agent.output_validator
-    def _execute_and_validate(ctx: RunContext[SqlDeps], output: SqlQuery) -> SqlQuery:
-        """Run the query; on any failure, ask the model to fix it."""
-        try:
-            ctx.deps.rows = ctx.deps.source.run_sql(output.sql)
-        except UnsafeQueryError as exc:
-            raise ModelRetry(
-                f"The query was rejected because it is not read-only: {exc}. "
-                "Return a single read-only SELECT statement."
-            ) from exc
-        except duckdb.Error as exc:
-            raise ModelRetry(
-                f"The query failed to run in DuckDB with error: {exc}. "
-                "Fix the SQL, using only the tables and columns from the schema."
-            ) from exc
-        return output
 
-    return agent
+def _build_prompt(question: str, schema_text: str, dict_text: str) -> str:
+    """Assemble the schema, optional dictionary, and question into one prompt."""
+    sections = [f"# Database schema\n{schema_text}"]
+    if dict_text.strip():
+        sections.append(f"# Data dictionary\n{dict_text}")
+    sections.append(f"# Question\n{question}")
+    return "\n\n".join(sections)
 
 
 def generate_sql(
-    agent: Agent[SqlDeps, SqlQuery],
+    agent: Runnable[list, SqlQuery],
     question: str,
     schema_text: str,
     dict_text: str,
@@ -105,14 +124,29 @@ def generate_sql(
 ) -> tuple[str, list[dict]]:
     """Generate a working SQL query and return it with its result rows.
 
-    The agent retries (up to _MAX_RETRIES) if DuckDB rejects the SQL. Raises
-    pydantic_ai.exceptions.UnexpectedModelBehavior if all retries are exhausted.
+    Retries (up to _MAX_RETRIES) if DuckDB rejects the SQL, feeding the error back
+    into the conversation each time. Raises SqlGenerationError if all attempts fail.
     """
-    deps = SqlDeps(source=source)
-    sections = [f"# Database schema\n{schema_text}"]
-    if dict_text.strip():
-        sections.append(f"# Data dictionary\n{dict_text}")
-    sections.append(f"# Question\n{question}")
-    prompt = "\n\n".join(sections)
-    result = agent.run_sync(prompt, deps=deps)
-    return result.output.sql.strip(), deps.rows
+    messages: list = [
+        SystemMessage(_INSTRUCTIONS),
+        HumanMessage(_build_prompt(question, schema_text, dict_text)),
+    ]
+    last_exc: BaseException | None = None
+
+    for _ in range(_MAX_RETRIES + 1):
+        sql = agent.invoke(messages).sql.strip()
+        try:
+            rows = _execute(source, sql)
+        except _RetrySql as retry:
+            # Feed the failure back as clean conversation turns and try again. We
+            # append a plain AIMessage (the SQL text), not the raw tool-call
+            # message, to avoid a dangling tool_use without a matching tool_result.
+            last_exc = retry.__cause__ or retry
+            messages.append(AIMessage(content=f"Previous attempt:\n{sql}"))
+            messages.append(HumanMessage(content=retry.feedback))
+            continue
+        return sql, rows
+
+    raise SqlGenerationError(
+        f"Could not produce a working query after {_MAX_RETRIES + 1} attempts."
+    ) from last_exc

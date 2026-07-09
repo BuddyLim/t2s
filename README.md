@@ -24,11 +24,12 @@ question ─▶ agent.py (LLM → validated SQL)
 ```
 
 - **DuckDB** reads the `.xlsx` directly; each sheet becomes a table.
-- **PydanticAI** drives the two Claude models (SQL generation + answer phrasing),
-  swappable via config, including a custom `base_url`.
+- **LangChain** (`langchain-anthropic`) drives the two Claude models (SQL
+  generation + answer phrasing), swappable via config, including a custom `base_url`.
+  The SQL step uses `with_structured_output` to always return a single SQL string.
 - Generated SQL is executed **read-only** — anything that isn't a plain `SELECT`
   is rejected before it touches the data.
-- **Self-correcting:** the SQL is run during validation; if DuckDB rejects it
+- **Self-correcting:** the SQL is run right after generation; if DuckDB rejects it
   (bad column, wrong function, syntax error) the actual error is fed back to the
   model, which retries up to 3 times before giving up.
 
