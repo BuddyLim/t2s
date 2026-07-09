@@ -7,10 +7,10 @@ requires-python = ">=3.12"
 dependencies = [
     "defusedxml>=0.7.1",
     "duckdb>=1.5.4",
+    "fastapi[standard]>=0.139.0",
     "pydantic-ai[anthropic]>=2.7.0",
     "pydantic-settings>=2.14.2",
     "python-docx>=1.2.0",
-    "rich>=15.0.0",
 ]
 
 [dependency-groups]
@@ -30,3 +30,6 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.fastapi]
+entrypoint = "app:app"
