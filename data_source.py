@@ -9,6 +9,7 @@ only the standard library.
 from __future__ import annotations
 
 import re
+import threading
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -73,6 +74,7 @@ class DataSource:
     excel_path: Path
     _con: duckdb.DuckDBPyConnection | None = field(default=None, init=False, repr=False)
     _tables: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def load(self) -> DataSource:
         """Load every sheet of the workbook into a DuckDB table."""
@@ -106,6 +108,11 @@ class DataSource:
             raise RuntimeError("DataSource.load() must be called before use.")
         return self._con
 
+    @property
+    def table_count(self) -> int:
+        """Return the number of tables loaded from the workbook."""
+        return len(self._tables)
+
     def schema_text(self) -> str:
         """Return a human/LLM-readable summary of tables and their columns."""
         lines: list[str] = []
@@ -124,9 +131,10 @@ class DataSource:
         """
         if not is_read_only(sql):
             raise UnsafeQueryError(f"Refusing to run non-read-only SQL: {sql!r}")
-        cur = self.connection.execute(sql)
-        columns = [d[0] for d in cur.description]
-        rows = cur.fetchmany(limit)
+        with self._lock:
+            cur = self.connection.execute(sql)
+            columns = [d[0] for d in cur.description]
+            rows = cur.fetchmany(limit)
         return [dict(zip(columns, row, strict=True)) for row in rows]
 
     def close(self) -> None:

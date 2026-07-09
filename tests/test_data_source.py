@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import duckdb
@@ -93,3 +94,22 @@ class TestDataSource:
         """Loading a nonexistent workbook raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
             DataSource(tmp_path / "nope.xlsx").load()
+
+    def test_run_sql_is_thread_safe(self, sample_xlsx: Path) -> None:
+        """Concurrent run_sql calls on a shared connection all succeed correctly."""
+        source = DataSource(sample_xlsx).load()
+        expected = [
+            {"name": "Alice", "age": 30.0},
+            {"name": "Bob", "age": 25.0},
+            {"name": "Cara", "age": 41.0},
+        ]
+
+        def query() -> list[dict]:
+            return source.run_sql("SELECT name, age FROM sheet1 ORDER BY name")
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            results = list(executor.map(lambda _: query(), range(10)))
+
+        for rows in results:
+            assert rows == expected
+        source.close()
