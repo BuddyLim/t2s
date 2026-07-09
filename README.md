@@ -1,15 +1,15 @@
 # t2s — natural-language querying over Excel
 
-Ask plain-English questions about an Excel workbook. `t2s` generates SQL with an
-LLM (text-to-SQL), runs it against the data in DuckDB, and prints a natural-language
-answer. An optional Word document can be supplied as a data dictionary; without one,
-the tool runs Excel-only.
+Ask plain-English questions about an Excel workbook over a small FastAPI HTTP
+server. `t2s` generates SQL with an LLM (text-to-SQL), runs it against the data
+in DuckDB, and returns a natural-language answer. An optional Word document can
+be supplied as a data dictionary; without one, the server runs Excel-only.
 
 ```
-? which city has the most customers?
-╭─ Answer ─────────────────────────────────────────╮
-│ NY has the most customers (2), followed by LA (1).│
-╰──────────────────────────────────────────────────╯
+$ curl -X POST localhost:8000/query \
+    -H 'content-type: application/json' \
+    -d '{"question":"which city has the most customers?"}'
+{"answer":"NY has the most customers (2), followed by LA (1)."}
 ```
 
 ## How it works
@@ -50,16 +50,47 @@ Set these in `.env`:
 
 ## Usage
 
+Run the server:
+
 ```bash
-uv run t2s.py            # start the interactive prompt
-uv run t2s.py --debug    # also print the generated SQL and raw rows
+uv run fastapi dev      # dev server (reload), uses the pyproject entrypoint
+uv run fastapi run      # production server
 ```
 
-Type questions at the `?` prompt; `exit` / `quit` (or Ctrl-D) to leave.
+Interactive API docs are served at `http://localhost:8000/docs`.
+
+Check health:
+
+```bash
+curl localhost:8000/health
+# {"status":"ok","tables":3}
+```
+
+Ask a question:
+
+```bash
+curl -X POST localhost:8000/query \
+  -H 'content-type: application/json' \
+  -d '{"question":"how many rows are there?"}'
+# {"answer":"There are 42 rows."}
+```
+
+Pass `"debug":true` to also get the generated SQL and raw rows:
+
+```bash
+curl -X POST localhost:8000/query \
+  -H 'content-type: application/json' \
+  -d '{"question":"how many rows are there?","debug":true}'
+# {"answer":"There are 42 rows.","sql":"SELECT COUNT(*) ...","rows":[{"count":42}]}
+```
+
+If the model can't produce a working query, `/query` returns `422` with a
+`detail` message; unexpected server errors return `500`.
 
 ## Development
 
 ```bash
 uv run ruff check .      # lint
+uv run ty check          # type check
 uv run pytest            # tests
 ```
