@@ -1,0 +1,32 @@
+[project]
+name = "t2s"
+version = "0.1.0"
+description = "Natural-language querying over an Excel file with a Word data dictionary."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "defusedxml>=0.7.1",
+    "duckdb>=1.5.4",
+    "pydantic-ai[anthropic]>=2.7.0",
+    "pydantic-settings>=2.14.2",
+    "python-docx>=1.2.0",
+    "rich>=15.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.15.20",
+    "ty>=0.0.57",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
