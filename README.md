@@ -88,6 +88,20 @@ curl -X POST localhost:8000/query \
 If the model can't produce a working query, `/query` returns `422` with a
 `detail` message; unexpected server errors return `500`.
 
+### Web UI
+
+A small Streamlit front-end (`ui.py`) is available as a thin HTTP client over the
+API. Install its extras, start the API, then launch the UI in another terminal:
+
+```bash
+uv sync --group ui           # install streamlit + httpx
+uv run fastapi run           # terminal 1: start the API
+uv run streamlit run ui.py   # terminal 2: start the UI
+```
+
+Open http://localhost:8501 to ask questions in the browser. The UI reads the
+API base URL from the `T2S_API_URL` env var (default `http://localhost:8000`).
+
 ## Development
 
 ```bash
